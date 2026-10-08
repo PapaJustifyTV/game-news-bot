@@ -130,6 +130,9 @@ def build_prompt(kind):
 - title: заголовок-суть до 100 символів, без клікбейту;
 - summary: 2–4 речення, до 600 символів: що сталося, хто, коли, чому це важливо.
   Прибери хештеги, емодзі, згадки @, заклики «репостни/підпишись».
+- games: список відеоігор, про які йдеться в новині (до 5), — назви ТОЧНО так, як вони
+  написані в title або summary (в оригіналі). Лише ігри: не студії, не платформи, не серії
+  загалом, не фільми. Якщо ігор немає — порожній список.
 Якщо score нижче 3 — title і summary можна залишити порожніми.
 
 Правила мови:
@@ -138,7 +141,7 @@ def build_prompt(kind):
 - Нічого не вигадуй, лише факти з наданого тексту.
 - Дати та ціни — у звичному українському форматі.
 
-Відповідай ЛИШЕ JSON-об'єктом: {{"score": 0, "title": "...", "summary": "..."}}"""
+Відповідай ЛИШЕ JSON-об'єктом: {{"score": 0, "title": "...", "summary": "...", "games": ["..."]}}"""
 
 
 # ---------------------------------------------------------------- утиліти
@@ -477,6 +480,51 @@ def collect_steam(seen_set, remember, state):
     return items
 
 
+def _norm_game(name):
+    name = re.sub(r"[™®©]", "", name.lower())
+    name = re.sub(r"[^\w\s]", " ", name)
+    name = re.sub(r"\b(the|edition|game)\b", " ", name)
+    return re.sub(r"\s+", " ", name).strip()
+
+
+def steam_app_for(name, cache):
+    """Шукає гру в магазині Steam. Повертає посилання або None (якщо точного збігу немає)."""
+    key = _norm_game(name)
+    if not key:
+        return None
+    if key in cache:
+        return cache[key] or None
+    url = None
+    try:
+        r = requests.get(
+            "https://store.steampowered.com/api/storesearch/",
+            params={"term": name, "l": "english", "cc": "US"},
+            headers=HEADERS, timeout=20,
+        )
+        for item in (r.json().get("items") or [])[:10]:
+            if item.get("type", "app") == "app" and _norm_game(item.get("name", "")) == key:
+                url = f"https://store.steampowered.com/app/{item['id']}/"
+                break
+    except Exception as e:
+        log(f"   ! пошук у Steam не вдався ({e})")
+        return None  # не кешуємо помилку — спробуємо наступного разу
+    cache[key] = url or ""
+    return url
+
+
+def steam_links_for(games, state):
+    cache = state.setdefault("steam_ids", {})
+    if len(cache) > 3000:  # не даємо кешу розростатися
+        for k in list(cache)[:1000]:
+            cache.pop(k)
+    links = {}
+    for g in games:
+        url = steam_app_for(g, cache)
+        if url:
+            links[g] = url
+    return links
+
+
 # ---------------------------------------------------------------- Discord
 
 def discord_api(path, **params):
@@ -615,7 +663,8 @@ def call_llm(model, system_prompt, user_text, use_json=True):
         score = max(0, min(10, int(float(data.get("score", 0)))))
     except (TypeError, ValueError):
         score = 0
-    return score, (data.get("title") or "").strip(), (data.get("summary") or "").strip()
+    games = [str(g).strip() for g in (data.get("games") or []) if str(g).strip()][:5]
+    return score, (data.get("title") or "").strip(), (data.get("summary") or "").strip(), games
 
 
 def summarize(kind, title, text, source, recent_titles=()):
@@ -709,24 +758,47 @@ def tg(method, **kwargs):
     return data
 
 
-def build_caption(title, summary, link, source, score=None):
-    tail = f"\nВажливість: {score}/10" if score is not None else ""
-    def make(text):
-        return (
-            f"<b>{html.escape(title)}</b>\n\n"
-            f"{html.escape(text)}\n\n"
-            f'Джерело: <a href="{html.escape(link)}">{html.escape(source)}</a>{tail}'
-        )
-    caption = make(summary)
-    if len(caption) <= 1024:  # ліміт підпису до фото в Telegram
-        return caption
-    budget = 1024 - len(make("")) - 1
-    cut = ""
-    for ch in summary:
-        if len(html.escape(cut + ch)) > budget:
-            break
-        cut += ch
-    return make(cut.rstrip() + "…")
+def link_games(text_escaped, links, used):
+    """Робить першу згадку кожної гри посиланням на її сторінку в Steam."""
+    for name in sorted(links, key=len, reverse=True):  # довші назви першими: «Subnautica 2» до «Subnautica»
+        if name in used:
+            continue
+        esc = html.escape(name)
+        # шукаємо лише поза вже вставленими посиланнями
+        parts = re.split(r"(<a [^>]*>.*?</a>)", text_escaped)
+        for i, part in enumerate(parts):
+            if part.startswith("<a "):
+                continue
+            longer = [html.escape(n).lower() for n in links if len(n) > len(name)]
+            m = None
+            for cand in re.finditer(r"(?<!\w)" + re.escape(esc) + r"(?!\w)", part, re.I):
+                # не чіпаємо «Subnautica», якщо це початок «Subnautica 2»
+                if not any(part[cand.start():].lower().startswith(l) for l in longer):
+                    m = cand
+                    break
+            if m:
+                parts[i] = (part[:m.start()] + f'<a href="{html.escape(links[name])}">{m.group(0)}</a>'
+                            + part[m.end():])
+                used.add(name)
+                break
+        text_escaped = "".join(parts)
+    return text_escaped
+
+
+def build_caption(title, summary, link, source, steam_links=None):
+    steam_links = steam_links or {}
+    # Telegram рахує ліміт 1024 символи за видимим текстом, без HTML-тегів
+    visible_rest = len(title) + len(source) + len("\n\n\n\nДжерело: ")
+    if visible_rest + len(summary) > 1024:
+        summary = summary[: max(0, 1024 - visible_rest - 1)].rstrip() + "…"
+    used = set()
+    title_html = link_games(html.escape(title), steam_links, used)
+    summary_html = link_games(html.escape(summary), steam_links, used)
+    return (
+        f"<b>{title_html}</b>\n\n"
+        f"{summary_html}\n\n"
+        f'Джерело: <a href="{html.escape(link)}">{html.escape(source)}</a>'
+    )
 
 
 def post(caption, image_url):
@@ -828,10 +900,10 @@ def main():
 
         try:
             if not LLM_API_KEY and DRY_RUN:
-                score, title_uk, summary_uk = 10, it["title"], text[:300]
+                score, title_uk, summary_uk, games = 10, it["title"], text[:300], []
             else:
                 llm_calls += 1
-                score, title_uk, summary_uk = summarize(
+                score, title_uk, summary_uk, games = summarize(
                     it["kind"], it["title"], text or it["title"], it["source"],
                     [f'{r["t"]} — {r.get("s", "")}' for r in recent[-150:]],
                 )
@@ -844,7 +916,8 @@ def main():
                 log(f"   - [{score}/10] пропущено: [{it['source']}] {it['title'][:90]}")
             else:
                 log(f"-> [{score}/10] [{it['source']}] {title_uk}")
-                sent = post(build_caption(title_uk, summary_uk, it["link"], it["source"]), image)
+                steam_links = steam_links_for(games, state)
+                sent = post(build_caption(title_uk, summary_uk, it["link"], it["source"], steam_links), image)
                 post_score(sent, score)
                 recent.append({"t": title_uk, "s": summary_uk.split(". ")[0][:140], "ts": int(time.time())})
                 posted += 1
