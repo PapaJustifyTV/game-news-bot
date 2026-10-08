@@ -1,0 +1,129 @@
+# Акаунти X (Twitter), дописи яких потрапляють у чорновий канал.
+# Один юзернейм у рядку (можна з @). Щоб вимкнути — поставте # на початку.
+# Складено з підписок @iPapaJustify, @Wario64 і @shinobi602 + базовий список.
+# Нецікаве (мерч, знижки, мобільні/китайські ігри) ШІ все одно відсіє фільтром.
+
+# === Агрегатори та інсайдери (найшвидші новини) ===
+Wario64
+shinobi602
+Nibellion
+_Tom_Henderson_
+billbil_kun
+JeffGrubb
+BenjiSales
+ZhugeEX
+klobrille
+SteamDB
+mrpyo1
+
+# === Журналісти та лідери думок ===
+stephentotilo
+jeffgerstmann
+patrickklepek
+DanRyckert
+GameOverGreggy
+Papapishu
+JezCorden
+tomwarren
+DMC_Ryan
+Clert
+dark1x
+Slasher
+YongYea
+TinaAmini
+geoffkeighley
+
+# === Видання та медіа ===
+VGC_News
+Gematsu
+digitalfoundry
+pushsquare
+Aftermath_site
+RemapRadio
+giantbomb
+KindaFunnyVids
+EasyAllies
+
+# === Українські ігрові медіа й автори ===
+GamewayUA
+OLDboiUA
+nuzhnov_v
+
+# === Платформи та їхні керівники ===
+PlayStation
+XBOX
+asha_shar
+aarongreenberg
+hermenhulst
+yosp
+NintendoAmerica
+Nintendo
+Steam
+EpicGames
+thegameawards
+
+# === Великі видавці ===
+Ubisoft
+EA
+bethesda
+RockstarGames
+Blizzard_Ent
+CapcomUSA_
+SquareEnix
+BandaiNamcoUS
+riotgames
+Focus_entmt
+Kepler_Interact
+BlumhouseGames
+
+# === Студії ===
+CDPROJEKTRED
+LarianStudios
+HazelightGames
+BendStudio
+inXile
+fromsoftware_pr
+UNBND_Official
+nagoshistudio
+CLOVERS_en
+dev1_official
+RedHookStudios
+UnknownWorlds
+lofigames
+PitheadStudio
+RebelWolvesDevs
+DONTNOD_Ent
+blooberteam
+NixxesSoftware
+warhammer
+
+# === Українські студії ===
+GSC_GameWorld
+4AGames
+Frogwares
+
+# === Розробники (особисті акаунти) ===
+HidekiKamiya_X
+LarAtLarian
+Skalemba
+A_dmg04
+DONTNOD_Michel
+Mackerski
+xyzhdanovich
+
+# === Окремі ігри та серії ===
+StarCraft
+DarkestDungeon
+KenshiOfficial
+Subnautica
+TheDuskbloods
+OnimushaGame
+Metalgear
+AceCombatGames
+thelastofus
+ironmangame
+divinity
+MarathonTheGame
+DawnwalkerGame
+CronosNewDawn
+FarFarWestGame

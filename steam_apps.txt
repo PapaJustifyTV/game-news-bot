@@ -1,0 +1,21 @@
+# Ігри в Steam, за якими стежимо: офіційні оголошення розробників, патчі
+# та ЗМІНИ ДАТИ ВИХОДУ (те, що зазвичай ловлять на SteamDB).
+# Формат: Назва | ID гри. ID — це число з адреси сторінки гри:
+#   store.steampowered.com/app/1643320/... -> 1643320
+# Дрібні патчі ШІ відсіє сам за критеріями з importance.txt.
+
+S.T.A.L.K.E.R. 2 | 1643320
+Metro Exodus | 412020
+Cyberpunk 2077 | 1091500
+Baldur's Gate 3 | 1086940
+Elden Ring | 1245620
+Hollow Knight: Silksong | 1030300
+Kingdom Come: Deliverance II | 1771300
+Helldivers 2 | 553850
+Path of Exile 2 | 2694490
+Hades II | 1145350
+Monster Hunter Wilds | 2246340
+Warhammer 40,000: Space Marine 2 | 2183900
+Warhammer 40,000: Darktide | 1361210
+Warhammer 40,000: Rogue Trader | 2186680
+Total War: WARHAMMER III | 1142710

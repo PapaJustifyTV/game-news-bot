@@ -1,0 +1,19 @@
+# Список RSS-стрічок. Формат: Назва (як буде підписано джерело) | посилання
+# Щоб вимкнути джерело — поставте # на початку рядка.
+
+PC Gamer | https://www.pcgamer.com/rss/
+VGC | https://www.videogameschronicle.com/feed/
+Gematsu | https://www.gematsu.com/feed
+Eurogamer | https://www.eurogamer.net/feed
+GamesIndustry.biz | https://www.gamesindustry.biz/feed
+Rock Paper Shotgun | https://www.rockpapershotgun.com/feed
+IGN | https://feeds.feedburner.com/ign/games-all
+GameSpot | https://www.gamespot.com/feeds/game-news/
+Polygon | https://www.polygon.com/rss/index.xml
+The Verge Games | https://www.theverge.com/rss/games/index.xml
+Game Developer | https://www.gamedeveloper.com/rss.xml
+Insider Gaming | https://insider-gaming.com/feed/
+Push Square | https://www.pushsquare.com/feeds/latest
+Nintendo Life | https://www.nintendolife.com/feeds/latest
+PlayStation Blog | https://blog.playstation.com/feed/
+Xbox Wire | https://news.xbox.com/en-us/feed/
