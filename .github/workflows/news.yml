@@ -2,7 +2,7 @@ name: Game news bot
 
 on:
   schedule:
-    - cron: "7,37 * * * *"    # двічі на годину, о :07 і :37 (не о :00 — тоді GitHub перевантажений)
+    - cron: "5,35 * * * *"    # двічі на годину, о :07 і :37 (не о :00 — тоді GitHub перевантажений)
   workflow_dispatch:          # кнопка ручного запуску у вкладці Actions
 
 permissions:
