@@ -6,7 +6,8 @@ on:
   workflow_dispatch:          # кнопка ручного запуску у вкладці Actions
 
 permissions:
-  contents: write             # щоб зберігати seen.json назад у репозиторій
+  contents: read
+  actions: write              # щоб прибирати старі копії пам'яті бота
 
 concurrency:
   group: news-bot
@@ -17,14 +18,25 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 25
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
           cache: pip
 
       - run: pip install -r requirements.txt
+
+      # Пам'ять бота (що вже опубліковано) живе в кеші GitHub, а не в репозиторії:
+      # так репозиторій не розростається і не з'являються зайві коміти.
+      - name: Restore memory
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            seen.json
+            state.json
+          key: news-state-${{ github.run_id }}
+          restore-keys: news-state-
 
       - name: Run bot
         env:
@@ -42,12 +54,20 @@ jobs:
           MIN_SCORE_DISCORD: ${{ vars.MIN_SCORE_DISCORD }}
         run: python bot.py
 
-      - name: Save state
+      - name: Save memory
         if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            seen.json
+            state.json
+          key: news-state-${{ github.run_id }}
+
+      - name: Clean old memory copies
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
-          git config user.name "news-bot"
-          git config user.email "news-bot@users.noreply.github.com"
-          git add seen.json state.json
-          git diff --cached --quiet || git commit -m "update state"
-          git pull --rebase --autostash || true
-          git push
+          # залишаємо 5 найсвіжіших копій пам'яті, решту видаляємо
+          gh cache list --key news-state- --sort created_at --order desc --limit 100 --json id --jq '.[5:][].id' \
+            | xargs -r -n1 gh cache delete || true
