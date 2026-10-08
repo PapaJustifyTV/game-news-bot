@@ -17,8 +17,9 @@
   MIN_SCORE           поріг важливості 0–10 для всіх джерел (5)
   MIN_SCORE_ARTICLE / MIN_SCORE_TWEET / MIN_SCORE_STEAM / MIN_SCORE_DISCORD
                       окремий поріг для джерела (якщо треба інший)
-  MAX_LLM_CALLS       максимум запитів до ШІ за запуск (80) — бережемо безкоштовні ліміти
-  MAX_POSTS_PER_RUN   скільки постів максимум за запуск (25)
+  MAX_LLM_CALLS       максимум запитів до ШІ за запуск (0 = без обмеження)
+  TIME_BUDGET_MIN     скільки хвилин максимум може тривати один запуск (45)
+  MAX_POSTS_PER_RUN   скільки постів максимум за запуск (0 = без обмеження)
   MAX_AGE_HOURS       новини старші за це не беремо (12)
   DRY_RUN=1           нічого не надсилати, лише друкувати в лог
 """
@@ -89,10 +90,12 @@ MIN_SCORE = {
     kind: int(os.getenv(f"MIN_SCORE_{kind.upper()}") or MIN_SCORE_DEFAULT)
     for kind in ("article", "tweet", "steam", "discord")
 }
-MAX_LLM_CALLS = int(os.getenv("MAX_LLM_CALLS") or "80")
+MAX_LLM_CALLS = int(os.getenv("MAX_LLM_CALLS") or "0")  # 0 = без обмеження
+TIME_BUDGET = 60 * float(os.getenv("TIME_BUDGET_MIN") or "45")  # щоб встигнути зберегти пам'ять до таймауту GitHub
+START_TIME = time.time()
 TG_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 TG_CHAT = os.getenv("TELEGRAM_CHAT_ID", "")
-MAX_POSTS = int(os.getenv("MAX_POSTS_PER_RUN") or "25")
+MAX_POSTS = int(os.getenv("MAX_POSTS_PER_RUN") or "0")  # 0 = без обмеження
 MAX_AGE = timedelta(hours=float(os.getenv("MAX_AGE_HOURS") or "12"))
 DRY_RUN = os.getenv("DRY_RUN") == "1"
 SEEN_LIMIT = 8000  # скільки посилань пам'ятати
@@ -615,8 +618,20 @@ def call_llm(model, system_prompt, user_text, use_json=True):
     return score, (data.get("title") or "").strip(), (data.get("summary") or "").strip()
 
 
-def summarize(kind, title, text, source):
+def summarize(kind, title, text, source, recent_titles=()):
     prompt = build_prompt(kind)
+    if recent_titles:
+        prompt += (
+            "\n\nНОВИНИ, ЯКІ ВЖЕ Є В КАНАЛІ (за останні 3 доби; заголовок — суть):\n"
+            + "\n".join(f"- {t}" for t in recent_titles)
+            + "\nПорівнюй за СЕНСОМ, а не за словами: заголовки з різних джерел можуть бути "
+              "зовсім різними. Якщо ця новина про ту саму подію (той самий анонс, реліз, дата, "
+              "трейлер, оновлення, угода), що й одна з наведених вище, і НЕ додає нових важливих "
+              "фактів — це дубль. Наприклад: «Гра X вийшла на ПК» і «Відбувся реліз X у Steam» — "
+              "дубль; «Анонсовано X» і пізніше «X вийде 5 травня» — НЕ дубль (нова дата). "
+              "Для дубля "
+              'поверни {"score": 0, "title": "ДУБЛЬ", "summary": ""}.'
+        )
     user_text = f"Джерело: {source}\nЗаголовок: {title}\n\nТекст:\n{text[:6000]}"
 
     while MODELS:
@@ -792,9 +807,15 @@ def main():
 
     posted = skipped = llm_calls = failed = 0
     fails = state.setdefault("fails", {})
+    # заголовки опублікованого за 3 доби — щоб ШІ впізнавав ту саму новину з інших джерел
+    recent = [r for r in state.get("recent", []) if time.time() - r["ts"] < 72 * 3600]
+    state["recent"] = recent
     for it in items:
-        if posted >= MAX_POSTS or llm_calls >= MAX_LLM_CALLS:
+        if (MAX_POSTS and posted >= MAX_POSTS) or (MAX_LLM_CALLS and llm_calls >= MAX_LLM_CALLS):
             log("Досягнуто ліміту за запуск, решта — наступного разу")
+            break
+        if time.time() - START_TIME > TIME_BUDGET:
+            log(f"Запуск триває вже {TIME_BUDGET/60:.0f} хв — решту черги оброблю наступного разу")
             break
 
         if it["kind"] == "article":
@@ -810,15 +831,22 @@ def main():
                 score, title_uk, summary_uk = 10, it["title"], text[:300]
             else:
                 llm_calls += 1
-                score, title_uk, summary_uk = summarize(it["kind"], it["title"], text or it["title"], it["source"])
+                score, title_uk, summary_uk = summarize(
+                    it["kind"], it["title"], text or it["title"], it["source"],
+                    [f'{r["t"]} — {r.get("s", "")}' for r in recent[-150:]],
+                )
             threshold = MIN_SCORE[it["kind"]]
-            if score < threshold or not title_uk:
+            if title_uk.strip().upper() == "ДУБЛЬ":
+                skipped += 1
+                log(f"   = дубль, пропущено: [{it['source']}] {it['title'][:90]}")
+            elif score < threshold or not title_uk:
                 skipped += 1
                 log(f"   - [{score}/10] пропущено: [{it['source']}] {it['title'][:90]}")
             else:
                 log(f"-> [{score}/10] [{it['source']}] {title_uk}")
                 sent = post(build_caption(title_uk, summary_uk, it["link"], it["source"]), image)
                 post_score(sent, score)
+                recent.append({"t": title_uk, "s": summary_uk.split(". ")[0][:140], "ts": int(time.time())})
                 posted += 1
                 if not DRY_RUN:
                     time.sleep(3)  # щоб не впертись у ліміти Telegram
