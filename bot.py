@@ -561,10 +561,10 @@ class LLMQuotaError(RuntimeError):
 
 
 def post_with_retry(url, headers, body):
-    for attempt in range(4):
+    for attempt in range(3):
         r = requests.post(url, headers=headers, json=body, timeout=90)
-        if r.status_code in (429, 503) and attempt < 3:  # ліміт безкоштовного тарифу / перевантаження
-            wait = 20 * (attempt + 1)
+        if r.status_code in (429, 503) and attempt < 2:  # ліміт безкоштовного тарифу / перевантаження
+            wait = 10 * (attempt + 1)
             log(f"   ! ліміт запитів ШІ, чекаю {wait} с")
             time.sleep(wait)
             continue
@@ -619,20 +619,25 @@ def summarize(kind, title, text, source):
     prompt = build_prompt(kind)
     user_text = f"Джерело: {source}\nЗаголовок: {title}\n\nТекст:\n{text[:6000]}"
 
-    last_error = None
     while MODELS:
         model = MODELS[0]
         try:
             try:
                 return call_llm(model, prompt, user_text)
+            except LLMQuotaError:
+                raise
             except RuntimeError as e:
                 if any(w in str(e).lower() for w in ("response_format", "responsemimetype", "json")):
                     return call_llm(model, prompt, user_text, use_json=False)
                 raise
-        except LLMQuotaError:
-            raise  # ліміт або перевантаження — модель не міняємо, просто пробуємо пізніше
+        except LLMQuotaError as e:
+            # модель перевантажена або вичерпано її ліміт — у інших моделей свої ліміти
+            if len(MODELS) > 1:
+                log(f"   ! {model} зараз недоступна ({str(e)[:40]}…), перемикаюсь на {MODELS[1]}")
+                MODELS.pop(0)
+                continue
+            raise
         except RuntimeError as e:
-            last_error = e
             msg = str(e).lower()
             # модель не існує / недоступна для вашого ключа — перемикаємось на наступну
             if len(MODELS) > 1 and (" 404" in msg or "not found" in msg or "not supported" in msg):
@@ -640,7 +645,7 @@ def summarize(kind, title, text, source):
                 MODELS.pop(0)
                 continue
             raise
-    raise last_error
+    raise LLMQuotaError("немає доступних моделей")
 
 
 def discover_gemini_models():
