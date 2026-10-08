@@ -44,6 +44,18 @@ X_ACCOUNTS_FILE = BASE_DIR / "x_accounts.txt"
 STEAM_FILE = BASE_DIR / "steam_apps.txt"
 DISCORD_FILE = BASE_DIR / "discord_channels.txt"
 IMPORTANCE_FILE = BASE_DIR / "importance.txt"
+ORIGIN_RULES_FILE = BASE_DIR / "origin_rules.txt"
+ORIGINS_FILE = BASE_DIR / "origins.txt"
+
+# Теги вердикту під постом
+VERDICT_TEXT = {
+    "ru": "#йобанарусня",
+    "cn": "#йобанийкитай",
+    "cn_minor": "#напівшишечкийобанийкитай",
+    "ok": "Не русня",
+    "unknown": "не вдалося перевірити",
+}
+ORIGIN_CACHE_DAYS = 30
 SEEN_FILE = BASE_DIR / "seen.json"
 STATE_FILE = BASE_DIR / "state.json"
 
@@ -525,6 +537,138 @@ def steam_links_for(games, state):
     return links
 
 
+# ---------------------------------------------------------------- Перевірка розробника і видавця
+
+def _read_rules(path):
+    if not path.exists():
+        return ""
+    return "\n".join(l for l in path.read_text(encoding="utf-8").splitlines()
+                     if not l.lstrip().startswith("#")).strip()
+
+
+def load_origin_overrides():
+    """origins.txt: «Назва | вердикт | країна»."""
+    result = {}
+    if not ORIGINS_FILE.exists():
+        return result
+    for line in ORIGINS_FILE.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "|" not in line:
+            continue
+        parts = [p.strip() for p in line.split("|")]
+        name, verdict = parts[0], (parts[1] if len(parts) > 1 else "").lower()
+        if verdict in VERDICT_TEXT:
+            result[_norm_game(name)] = {"verdict": verdict, "country": parts[2] if len(parts) > 2 else ""}
+    return result
+
+
+ORIGIN_PROMPT = """Ти — аналітик ігрової індустрії. Визнач розробника і видавця гри та перевір,
+звідки ці компанії і кому вони належать. Обов'язково перевір факти пошуком і не вигадуй.
+
+{rules}
+
+Для кожної компанії заповни:
+- name: назва компанії;
+- country: країна штаб-квартири українською; якщо заснована в іншій країні — допиши
+  «засн. у …» (наприклад «Кіпр, засн. у росії»); назву росії пиши з малої літери;
+- verdict: ru | cn | cn_minor | ok | unknown;
+- note: дуже коротко, на чому ґрунтується вердикт (власник, частка, місце заснування).
+
+Якщо розробник і видавець — одна компанія, заповни обидва однаково.
+Якщо видавця немає (самвидав) — publisher такий самий, як developer.
+
+Відповідай ЛИШЕ JSON-об'єктом:
+{{"developer": {{"name": "", "country": "", "verdict": "", "note": ""}},
+  "publisher": {{"name": "", "country": "", "verdict": "", "note": ""}}}}"""
+
+
+def ask_origin(game, steam_devs, steam_pubs):
+    prompt = ORIGIN_PROMPT.format(rules=_read_rules(ORIGIN_RULES_FILE))
+    hint = ""
+    if steam_devs or steam_pubs:
+        hint = (f"\nДані зі Steam: розробник — {', '.join(steam_devs) or 'невідомо'}; "
+                f"видавець — {', '.join(steam_pubs) or 'невідомо'}.")
+    user_text = f"Гра: {game}{hint}"
+    while MODELS:
+        model = MODELS[0]
+        try:
+            if LLM_PROVIDER == "gemini":
+                try:
+                    return llm_raw(model, prompt, user_text, grounding=True)
+                except LLMQuotaError:
+                    raise
+                except Exception as e:  # пошук Google недоступний — перевіряємо без нього
+                    log(f"   i перевірка без пошуку Google ({str(e)[:80]})")
+            return llm_raw(model, prompt, user_text)
+        except LLMQuotaError:
+            if len(MODELS) > 1:
+                MODELS.pop(0)
+                continue
+            raise
+    raise LLMQuotaError("немає доступних моделей")
+
+
+def check_origin(game, steam_url, state):
+    """Повертає {'developer': {...}, 'publisher': {...}} або None."""
+    cache = state.setdefault("origins", {})
+    key = _norm_game(game)
+    hit = cache.get(key)
+    if hit and time.time() - hit.get("ts", 0) < ORIGIN_CACHE_DAYS * 86400:
+        info = hit["info"]
+    else:
+        devs, pubs = [], []
+        m = re.search(r"/app/(\d+)", steam_url or "")
+        if m:
+            d = steam_details(m.group(1)) or {}
+            devs, pubs = d.get("developers") or [], d.get("publishers") or []
+        try:
+            info = ask_origin(game, devs, pubs)
+        except LLMQuotaError:
+            raise
+        except Exception as e:
+            log(f"   ! перевірка походження не вдалась ({e})")
+            return None
+        cache[key] = {"info": info, "ts": int(time.time())}
+        if len(cache) > 2000:
+            for k in sorted(cache, key=lambda k: cache[k].get("ts", 0))[:500]:
+                cache.pop(k)
+
+    overrides = load_origin_overrides()
+    result = {}
+    for role in ("developer", "publisher"):
+        c = dict(info.get(role) or {})
+        if not c.get("name"):
+            continue
+        o = overrides.get(_norm_game(c["name"]))
+        if o:
+            c["verdict"] = o["verdict"]
+            c["country"] = o["country"] or c.get("country", "")
+        if c.get("verdict") not in VERDICT_TEXT:
+            c["verdict"] = "unknown"
+        result[role] = c
+    return result or None
+
+
+def origin_block(origin):
+    if not origin:
+        return ""
+    lines = []
+    for role, label in (("developer", "Розробник"), ("publisher", "Видавець")):
+        c = origin.get(role)
+        if c:
+            country = f" ({c['country']})" if c.get("country") else ""
+            lines.append(f"{label}: {c['name']}{country}")
+    verdicts = [c["verdict"] for c in origin.values()]
+    for v in ("ru", "cn", "cn_minor"):
+        if v in verdicts:
+            final = v
+            break
+    else:
+        final = "unknown" if "unknown" in verdicts else "ok"
+    lines.append(f"Вердикт: {VERDICT_TEXT[final]}")
+    return "\n".join(lines)
+
+
 # ---------------------------------------------------------------- Discord
 
 def discord_api(path, **params):
@@ -627,13 +771,16 @@ def post_with_retry(url, headers, body):
     return r.json()
 
 
-def call_llm(model, system_prompt, user_text, use_json=True):
+def llm_raw(model, system_prompt, user_text, use_json=True, grounding=False):
+    """Один запит до ШІ. Повертає розібраний JSON-об'єкт."""
     if LLM_PROVIDER == "gemini":
         body = {
             "systemInstruction": {"parts": [{"text": system_prompt}]},
             "contents": [{"role": "user", "parts": [{"text": user_text}]}],
         }
-        if use_json:
+        if grounding:
+            body["tools"] = [{"google_search": {}}]  # пошук Google для перевірки фактів
+        elif use_json:
             body["generationConfig"] = {"responseMimeType": "application/json"}
         data = post_with_retry(
             PROVIDER["url"].format(model=model),
@@ -658,7 +805,11 @@ def call_llm(model, system_prompt, user_text, use_json=True):
         content = data["choices"][0]["message"]["content"] or ""
 
     match = re.search(r"\{.*\}", content, re.S)  # на випадок ```json ... ``` навколо
-    data = json.loads(match.group(0) if match else content)
+    return json.loads(match.group(0) if match else content)
+
+
+def call_llm(model, system_prompt, user_text, use_json=True):
+    data = llm_raw(model, system_prompt, user_text, use_json)
     try:
         score = max(0, min(10, int(float(data.get("score", 0)))))
     except (TypeError, ValueError):
@@ -785,10 +936,10 @@ def link_games(text_escaped, links, used):
     return text_escaped
 
 
-def build_caption(title, summary, link, source, steam_links=None):
+def build_caption(title, summary, link, source, steam_links=None, origin_text=""):
     steam_links = steam_links or {}
     # Telegram рахує ліміт 1024 символи за видимим текстом, без HTML-тегів
-    visible_rest = len(title) + len(source) + len("\n\n\n\nДжерело: ")
+    visible_rest = len(title) + len(source) + len("\n\n\n\nДжерело: ") + (len(origin_text) + 2 if origin_text else 0)
     if visible_rest + len(summary) > 1024:
         summary = summary[: max(0, 1024 - visible_rest - 1)].rstrip() + "…"
     used = set()
@@ -798,6 +949,7 @@ def build_caption(title, summary, link, source, steam_links=None):
         f"<b>{title_html}</b>\n\n"
         f"{summary_html}\n\n"
         f'Джерело: <a href="{html.escape(link)}">{html.escape(source)}</a>'
+        + (f"\n\n{html.escape(origin_text)}" if origin_text else "")
     )
 
 
@@ -917,7 +1069,14 @@ def main():
             else:
                 log(f"-> [{score}/10] [{it['source']}] {title_uk}")
                 steam_links = steam_links_for(games, state)
-                sent = post(build_caption(title_uk, summary_uk, it["link"], it["source"], steam_links), image)
+                origin_text = ""
+                if games:
+                    origin = check_origin(games[0], steam_links.get(games[0]), state)
+                    origin_text = origin_block(origin)
+                    if origin_text:
+                        log("   " + origin_text.replace("\n", " | "))
+                sent = post(build_caption(title_uk, summary_uk, it["link"], it["source"],
+                                          steam_links, origin_text), image)
                 post_score(sent, score)
                 recent.append({"t": title_uk, "s": summary_uk.split(". ")[0][:140], "ts": int(time.time())})
                 posted += 1
