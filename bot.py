@@ -680,20 +680,34 @@ def post(caption, image_url):
     if image_url:
         # 1) просимо Telegram самому завантажити картинку за посиланням
         try:
-            tg("sendPhoto", data={**base, "photo": image_url})
-            return
+            return tg("sendPhoto", data={**base, "photo": image_url})
         except Exception as e:
             log(f"   ! sendPhoto за URL не вдався ({e}), завантажую сам")
         # 2) завантажуємо картинку самі й відправляємо файлом
         try:
             img = requests.get(image_url, headers=HEADERS, timeout=30)
             img.raise_for_status()
-            tg("sendPhoto", data=base, files={"photo": ("image.jpg", img.content)})
-            return
+            return tg("sendPhoto", data=base, files={"photo": ("image.jpg", img.content)})
         except Exception as e:
             log(f"   ! не вдалось відправити картинку ({e}), шлю текстом")
     # 3) без картинки — звичайне повідомлення з прев'ю посилання
-    tg("sendMessage", data={"chat_id": TG_CHAT, "text": caption, "parse_mode": "HTML"})
+    return tg("sendMessage", data={"chat_id": TG_CHAT, "text": caption, "parse_mode": "HTML"})
+
+
+def post_score(sent, score):
+    """Оцінка окремим повідомленням-відповіддю під постом: сам пост лишається чистим для пересилання."""
+    if DRY_RUN or not sent:
+        return
+    msg_id = (sent.get("result") or {}).get("message_id")
+    try:
+        tg("sendMessage", data={
+            "chat_id": TG_CHAT,
+            "text": f"↑ Важливість: {score}/10",
+            "reply_to_message_id": msg_id,
+            "disable_notification": "true",
+        })
+    except Exception as e:
+        log(f"   ! не вдалось надіслати оцінку ({e})")
 
 
 # ---------------------------------------------------------------- головний цикл
@@ -758,7 +772,8 @@ def main():
                 log(f"   - [{score}/10] пропущено: [{it['source']}] {it['title'][:90]}")
             else:
                 log(f"-> [{score}/10] [{it['source']}] {title_uk}")
-                post(build_caption(title_uk, summary_uk, it["link"], it["source"], score), image)
+                sent = post(build_caption(title_uk, summary_uk, it["link"], it["source"]), image)
+                post_score(sent, score)
                 posted += 1
                 if not DRY_RUN:
                     time.sleep(3)  # щоб не впертись у ліміти Telegram
