@@ -556,6 +556,10 @@ def collect_discord(seen_set, state):
 
 # ---------------------------------------------------------------- ШІ
 
+class LLMQuotaError(RuntimeError):
+    """Ліміт безкоштовного тарифу ШІ вичерпано — далі цього запуску немає сенсу смикати ШІ."""
+
+
 def post_with_retry(url, headers, body):
     for attempt in range(4):
         r = requests.post(url, headers=headers, json=body, timeout=90)
@@ -565,6 +569,8 @@ def post_with_retry(url, headers, body):
             time.sleep(wait)
             continue
         break
+    if r.status_code in (429, 503):
+        raise LLMQuotaError(f"{LLM_PROVIDER} {r.status_code}: {r.text[:300]}")
     if r.status_code != 200:
         raise RuntimeError(f"{LLM_PROVIDER} {r.status_code}: {r.text[:300]}")
     return r.json()
@@ -623,16 +629,47 @@ def summarize(kind, title, text, source):
                 if any(w in str(e).lower() for w in ("response_format", "responsemimetype", "json")):
                     return call_llm(model, prompt, user_text, use_json=False)
                 raise
+        except LLMQuotaError:
+            raise  # ліміт або перевантаження — модель не міняємо, просто пробуємо пізніше
         except RuntimeError as e:
             last_error = e
             msg = str(e).lower()
-            # модель не існує / недоступна — перемикаємось на наступну до кінця запуску
-            if len(MODELS) > 1 and ("model" in msg or " 404" in msg):
+            # модель не існує / недоступна для вашого ключа — перемикаємось на наступну
+            if len(MODELS) > 1 and (" 404" in msg or "not found" in msg or "not supported" in msg):
                 log(f"   ! модель {model} недоступна, перемикаюсь на {MODELS[1]}")
                 MODELS.pop(0)
                 continue
             raise
     raise last_error
+
+
+def discover_gemini_models():
+    """Питаємо Google, які моделі реально доступні цьому ключу, і ставимо найкращі першими."""
+    try:
+        r = requests.get(
+            "https://generativelanguage.googleapis.com/v1beta/models",
+            headers={"x-goog-api-key": LLM_API_KEY}, params={"pageSize": 200}, timeout=30,
+        )
+        r.raise_for_status()
+        available = [
+            m["name"].split("/", 1)[1] for m in r.json().get("models", [])
+            if "generateContent" in (m.get("supportedGenerationMethods") or [])
+        ]
+    except Exception as e:
+        log(f"i не вдалось отримати список моделей Gemini ({e}), беру стандартні")
+        return
+    bad = ("preview", "exp", "image", "tts", "audio", "live", "embedding", "thinking", "robotics", "computer")
+    def version(name):
+        nums = re.findall(r"\d+(?:\.\d+)?", name)
+        return float(nums[0]) if nums else 0.0
+    stable = [m for m in available if m.startswith("gemini-") and not any(b in m for b in bad)]
+    lite = sorted([m for m in stable if m.endswith("flash-lite")], key=version, reverse=True)
+    flash = sorted([m for m in stable if m.endswith("-flash")], key=version, reverse=True)
+    chosen = [m for m in MODELS if m in available and m not in PROVIDER["models"]]  # явно задана LLM_MODEL
+    chosen += [m for m in lite + flash if m not in chosen]
+    if chosen:
+        MODELS[:] = chosen[:4]
+        log(f"Доступні моделі Gemini: {', '.join(MODELS)}")
 
 
 # ---------------------------------------------------------------- Telegram
@@ -718,6 +755,8 @@ def main():
                               ("TELEGRAM_CHAT_ID", TG_CHAT)] if not v]
     if missing and not DRY_RUN:
         sys.exit("Не задані змінні: " + ", ".join(missing))
+    if LLM_PROVIDER == "gemini" and LLM_API_KEY:
+        discover_gemini_models()
     log(f"ШІ: {LLM_PROVIDER}, модель {MODELS[0]}")
 
     seen = load_json(SEEN_FILE, [])
@@ -746,7 +785,8 @@ def main():
         items = items[-5:]
         log("Перший запуск: обробляю лише 5 найсвіжіших, решту позначено прочитаними")
 
-    posted = skipped = llm_calls = 0
+    posted = skipped = llm_calls = failed = 0
+    fails = state.setdefault("fails", {})
     for it in items:
         if posted >= MAX_POSTS or llm_calls >= MAX_LLM_CALLS:
             log("Досягнуто ліміту за запуск, решта — наступного разу")
@@ -777,15 +817,25 @@ def main():
                 posted += 1
                 if not DRY_RUN:
                     time.sleep(3)  # щоб не впертись у ліміти Telegram
+        except LLMQuotaError as e:
+            log(f"!!! Ліміт ШІ вичерпано, решту новин оброблю наступного запуску. {e}")
+            break
         except Exception as e:
-            log(f"   ! помилка: {e} — [{it['source']}] {it['title'][:90]}")
-        remember(it["key"])  # позначаємо навіть при помилці, щоб не зациклитись
+            failed += 1
+            n = fails.get(it["key"], 0) + 1
+            log(f"   ! помилка (спроба {n}/3): {e} — [{it['source']}] {it['title'][:90]}")
+            if n < 3:  # даємо новині ще шанс наступного запуску
+                fails[it["key"]] = n
+                save()
+                continue
+        fails.pop(it["key"], None)
+        remember(it["key"])
         save()
         if not DRY_RUN:
             time.sleep(1.5)  # пауза для безкоштовного тарифу ШІ
 
     save()
-    log(f"Готово. Опубліковано: {posted}, відсіяно як неважливе: {skipped}")
+    log(f"Готово. Опубліковано: {posted}, відсіяно як неважливе: {skipped}, помилок: {failed}")
 
 
 if __name__ == "__main__":
