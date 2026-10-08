@@ -2,7 +2,7 @@ name: Game news bot
 
 on:
   schedule:
-    - cron: "*/30 * * * *"   # кожні 30 хвилин (час UTC)
+    - cron: "7,37 * * * *"   # кожні 30 хвилин (час UTC)
   workflow_dispatch:          # кнопка ручного запуску у вкладці Actions
 
 permissions:
