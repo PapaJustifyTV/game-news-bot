@@ -56,6 +56,7 @@ VERDICT_TEXT = {
     "unknown": "не вдалося перевірити",
 }
 ORIGIN_CACHE_DAYS = 30
+COMPANY_MARK = "company:"
 SEEN_FILE = BASE_DIR / "seen.json"
 STATE_FILE = BASE_DIR / "state.json"
 
@@ -145,6 +146,8 @@ def build_prompt(kind):
 - games: список відеоігор, про які йдеться в новині (до 5), — назви ТОЧНО так, як вони
   написані в title або summary (в оригіналі). Лише ігри: не студії, не платформи, не серії
   загалом, не фільми. Якщо ігор немає — порожній список.
+- company: якщо новина не про конкретну гру, а про компанію (студію, видавця) — її назва
+  в оригіналі; інакше порожній рядок.
 Якщо score нижче 3 — title і summary можна залишити порожніми.
 
 Правила мови:
@@ -153,7 +156,7 @@ def build_prompt(kind):
 - Нічого не вигадуй, лише факти з наданого тексту.
 - Дати та ціни — у звичному українському форматі.
 
-Відповідай ЛИШЕ JSON-об'єктом: {{"score": 0, "title": "...", "summary": "...", "games": ["..."]}}"""
+Відповідай ЛИШЕ JSON-об'єктом: {{"score": 0, "title": "...", "summary": "...", "games": ["..."], "company": ""}}"""
 
 
 # ---------------------------------------------------------------- утиліти
@@ -531,6 +534,8 @@ def steam_links_for(games, state):
             cache.pop(k)
     links = {}
     for g in games:
+        if g.startswith(COMPANY_MARK):
+            continue
         url = steam_app_for(g, cache)
         if url:
             links[g] = url
@@ -588,7 +593,12 @@ def ask_origin(game, steam_devs, steam_pubs):
     if steam_devs or steam_pubs:
         hint = (f"\nДані зі Steam: розробник — {', '.join(steam_devs) or 'невідомо'}; "
                 f"видавець — {', '.join(steam_pubs) or 'невідомо'}.")
-    user_text = f"Гра: {game}{hint}"
+    if game.startswith(COMPANY_MARK):
+        user_text = (f"Компанія: {game[len(COMPANY_MARK):]}\nЦе не гра, а компанія. Заповни developer "
+                     "даними цієї компанії, а publisher — її материнською компанією-власником "
+                     "(якщо власника немає — тими самими даними).")
+    else:
+        user_text = f"Гра: {game}{hint}"
     while MODELS:
         model = MODELS[0]
         try:
@@ -626,8 +636,8 @@ def check_origin(game, steam_url, state):
         except LLMQuotaError:
             raise
         except Exception as e:
-            log(f"   ! перевірка походження не вдалась ({e})")
-            return None
+            log(f"   ! перевірка походження не вдалась ({str(e)[:200]})")
+            return {"_failed": True}
         cache[key] = {"info": info, "ts": int(time.time())}
         if len(cache) > 2000:
             for k in sorted(cache, key=lambda k: cache[k].get("ts", 0))[:500]:
@@ -646,19 +656,29 @@ def check_origin(game, steam_url, state):
         if c.get("verdict") not in VERDICT_TEXT:
             c["verdict"] = "unknown"
         result[role] = c
+    if result and game.startswith(COMPANY_MARK):
+        result["_company"] = True
     return result or None
 
 
 def origin_block(origin):
     if not origin:
         return ""
+    if origin.get("_failed"):
+        return f"Вердикт: {VERDICT_TEXT['unknown']}"
     lines = []
-    for role, label in (("developer", "Розробник"), ("publisher", "Видавець")):
+    labels = (("developer", "Компанія"), ("publisher", "Власник")) if origin.get("_company") \
+        else (("developer", "Розробник"), ("publisher", "Видавець"))
+    seen_names = set()
+    for role, label in labels:
         c = origin.get(role)
         if c:
+            if origin.get("_company") and c["name"] in seen_names:
+                continue  # компанія без окремого власника — не дублюємо рядок
+            seen_names.add(c["name"])
             country = f" ({c['country']})" if c.get("country") else ""
             lines.append(f"{label}: {c['name']}{country}")
-    verdicts = [c["verdict"] for c in origin.values()]
+    verdicts = [c["verdict"] for c in origin.values() if isinstance(c, dict)]
     for v in ("ru", "cn", "cn_minor"):
         if v in verdicts:
             final = v
@@ -815,6 +835,9 @@ def call_llm(model, system_prompt, user_text, use_json=True):
     except (TypeError, ValueError):
         score = 0
     games = [str(g).strip() for g in (data.get("games") or []) if str(g).strip()][:5]
+    company = str(data.get("company") or "").strip()
+    if company and not games:
+        games = [f"{COMPANY_MARK}{company}"]  # позначка: перевіряти компанію, а не гру
     return score, (data.get("title") or "").strip(), (data.get("summary") or "").strip(), games
 
 
@@ -1073,8 +1096,9 @@ def main():
                 if games:
                     origin = check_origin(games[0], steam_links.get(games[0]), state)
                     origin_text = origin_block(origin)
-                    if origin_text:
-                        log("   " + origin_text.replace("\n", " | "))
+                    log("   " + (origin_text.replace("\n", " | ") or "походження: порожня відповідь ШІ"))
+                else:
+                    log("   i у новині не знайдено ні гри, ні компанії — перевірку походження пропущено")
                 sent = post(build_caption(title_uk, summary_uk, it["link"], it["source"],
                                           steam_links, origin_text), image)
                 post_score(sent, score)
