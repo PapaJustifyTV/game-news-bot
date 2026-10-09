@@ -587,6 +587,19 @@ ORIGIN_PROMPT = """Ти — аналітик ігрової індустрії. 
   "publisher": {{"name": "", "country": "", "verdict": "", "note": ""}}}}"""
 
 
+GROUNDING = {"ok": True}  # пошук Google вимикається до кінця запуску, якщо його ліміт вичерпано
+
+
+def _valid_origin(data):
+    dev = data.get("developer") or data.get("розробник")
+    pub = data.get("publisher") or data.get("видавець")
+    if not isinstance(dev, dict) or not dev.get("name"):
+        return None
+    if not isinstance(pub, dict) or not pub.get("name"):
+        pub = dev
+    return {"developer": dev, "publisher": pub}
+
+
 def ask_origin(game, steam_devs, steam_pubs):
     prompt = ORIGIN_PROMPT.format(rules=_read_rules(ORIGIN_RULES_FILE))
     hint = ""
@@ -599,23 +612,26 @@ def ask_origin(game, steam_devs, steam_pubs):
                      "(якщо власника немає — тими самими даними).")
     else:
         user_text = f"Гра: {game}{hint}"
-    while MODELS:
-        model = MODELS[0]
-        try:
-            if LLM_PROVIDER == "gemini":
-                try:
-                    return llm_raw(model, prompt, user_text, grounding=True)
-                except LLMQuotaError:
-                    raise
-                except Exception as e:  # пошук Google недоступний — перевіряємо без нього
-                    log(f"   i перевірка без пошуку Google ({str(e)[:80]})")
-            return llm_raw(model, prompt, user_text)
-        except LLMQuotaError:
-            if len(MODELS) > 1:
-                MODELS.pop(0)
-                continue
-            raise
-    raise LLMQuotaError("немає доступних моделей")
+
+    errors = []
+    for model in list(MODELS):
+        modes = [True, False] if (LLM_PROVIDER == "gemini" and GROUNDING["ok"]) else [False]
+        for grounding in modes:
+            try:
+                info = _valid_origin(llm_raw(model, prompt, user_text, grounding=grounding))
+                if info:
+                    return info
+                errors.append(f"{model}{'+пошук' if grounding else ''}: без назви компанії")
+            except LLMQuotaError as e:
+                errors.append(f"{model}{'+пошук' if grounding else ''}: ліміт")
+                if grounding:
+                    GROUNDING["ok"] = False
+                    log("   i ліміт пошуку Google вичерпано — далі перевіряю без нього")
+                    continue
+                break  # ця модель перевантажена — пробуємо наступну
+            except Exception as e:
+                errors.append(f"{model}{'+пошук' if grounding else ''}: {str(e)[:120]}")
+    raise RuntimeError("; ".join(errors[-4:]) or "немає моделей")
 
 
 def check_origin(game, steam_url, state):
@@ -824,8 +840,36 @@ def llm_raw(model, system_prompt, user_text, use_json=True, grounding=False):
         data = post_with_retry(PROVIDER["url"], {"Authorization": f"Bearer {LLM_API_KEY}"}, body)
         content = data["choices"][0]["message"]["content"] or ""
 
-    match = re.search(r"\{.*\}", content, re.S)  # на випадок ```json ... ``` навколо
-    return json.loads(match.group(0) if match else content)
+    return extract_json(content)
+
+
+def extract_json(content):
+    """Дістає JSON-об'єкт з відповіді ШІ, навіть якщо навколо є текст, ```json чи посилання."""
+    content = (content or "").strip()
+    try:
+        data = json.loads(content)
+    except ValueError:
+        data = None
+        decoder = json.JSONDecoder()
+        for pattern in (r"\{", r"\["):  # спершу шукаємо об'єкт, і лише потім список
+            for m in re.finditer(pattern, content):
+                try:
+                    candidate, _ = decoder.raw_decode(content[m.start():])
+                except ValueError:
+                    continue
+                if isinstance(candidate, dict) or (
+                        isinstance(candidate, list) and any(isinstance(d, dict) for d in candidate)):
+                    data = candidate
+                    break
+            if data is not None:
+                break
+        if data is None:
+            raise ValueError(f"у відповіді ШІ немає JSON: {content[:150]!r}")
+    if isinstance(data, list):  # іноді модель загортає об'єкт у список
+        data = next((d for d in data if isinstance(d, dict)), {})
+    if not isinstance(data, dict):
+        raise ValueError(f"неочікувана відповідь ШІ: {str(data)[:150]!r}")
+    return data
 
 
 def call_llm(model, system_prompt, user_text, use_json=True):
@@ -998,7 +1042,7 @@ def post(caption, image_url):
     return tg("sendMessage", data={"chat_id": TG_CHAT, "text": caption, "parse_mode": "HTML"})
 
 
-def post_score(sent, score):
+def post_score(sent, score, origin_text=""):
     """Оцінка окремим повідомленням-відповіддю під постом: сам пост лишається чистим для пересилання."""
     if DRY_RUN or not sent:
         return
@@ -1006,7 +1050,7 @@ def post_score(sent, score):
     try:
         tg("sendMessage", data={
             "chat_id": TG_CHAT,
-            "text": f"↑ Важливість: {score}/10",
+            "text": f"↑ Важливість: {score}/10" + (f"\n\n{origin_text}" if origin_text else ""),
             "reply_to_message_id": msg_id,
             "disable_notification": "true",
         })
@@ -1099,9 +1143,8 @@ def main():
                     log("   " + (origin_text.replace("\n", " | ") or "походження: порожня відповідь ШІ"))
                 else:
                     log("   i у новині не знайдено ні гри, ні компанії — перевірку походження пропущено")
-                sent = post(build_caption(title_uk, summary_uk, it["link"], it["source"],
-                                          steam_links, origin_text), image)
-                post_score(sent, score)
+                sent = post(build_caption(title_uk, summary_uk, it["link"], it["source"], steam_links), image)
+                post_score(sent, score, origin_text)
                 recent.append({"t": title_uk, "s": summary_uk.split(". ")[0][:140], "ts": int(time.time())})
                 posted += 1
                 if not DRY_RUN:
