@@ -44,6 +44,9 @@ X_ACCOUNTS_FILE = BASE_DIR / "x_accounts.txt"
 STEAM_FILE = BASE_DIR / "steam_apps.txt"
 DISCORD_FILE = BASE_DIR / "discord_channels.txt"
 IMPORTANCE_FILE = BASE_DIR / "importance.txt"
+FILM_FEEDS_FILE = BASE_DIR / "film_feeds.txt"
+FILM_X_ACCOUNTS_FILE = BASE_DIR / "film_x_accounts.txt"
+FILM_IMPORTANCE_FILE = BASE_DIR / "film_importance.txt"
 ORIGIN_RULES_FILE = BASE_DIR / "origin_rules.txt"
 ORIGINS_FILE = BASE_DIR / "origins.txt"
 
@@ -101,13 +104,15 @@ DISCORD_TOKEN = os.getenv("DISCORD_BOT_TOKEN", "")
 MIN_SCORE_DEFAULT = int(os.getenv("MIN_SCORE") or "5")
 MIN_SCORE = {
     kind: int(os.getenv(f"MIN_SCORE_{kind.upper()}") or MIN_SCORE_DEFAULT)
-    for kind in ("article", "tweet", "steam", "discord")
+    for kind in ("article", "tweet", "steam", "discord", "film")
 }
 MAX_LLM_CALLS = int(os.getenv("MAX_LLM_CALLS") or "0")  # 0 = без обмеження
 TIME_BUDGET = 60 * float(os.getenv("TIME_BUDGET_MIN") or "45")  # щоб встигнути зберегти пам'ять до таймауту GitHub
 START_TIME = time.time()
 TG_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 TG_CHAT = os.getenv("TELEGRAM_CHAT_ID", "")
+# необов'язково: окремий канал-чернетка для кіно (інакше — той самий)
+TG_FILM_CHAT = os.getenv("TELEGRAM_FILM_CHAT_ID") or TG_CHAT
 MAX_POSTS = int(os.getenv("MAX_POSTS_PER_RUN") or "0")  # 0 = без обмеження
 MAX_AGE = timedelta(hours=float(os.getenv("MAX_AGE_HOURS") or "12"))
 DRY_RUN = os.getenv("DRY_RUN") == "1"
@@ -128,11 +133,38 @@ SOURCE_HINTS = {
 }
 
 
-def build_prompt(kind):
+FILM_PROMPT_EXTRA = """
+- games: порожній список [] (це новина кіно).
+- company: порожній рядок."""
+
+
+def build_prompt(kind, topic="games"):
+    imp_file = FILM_IMPORTANCE_FILE if topic == "film" else IMPORTANCE_FILE
     criteria = "\n".join(
-        l for l in IMPORTANCE_FILE.read_text(encoding="utf-8").splitlines()
+        l for l in imp_file.read_text(encoding="utf-8").splitlines()
         if not l.lstrip().startswith("#")
-    ).strip() if IMPORTANCE_FILE.exists() else "Оціни важливість новини від 0 до 10."
+    ).strip() if imp_file.exists() else "Оціни важливість новини від 0 до 10."
+    if topic == "film":
+        return f"""Ти — редактор українського Telegram-каналу новин кіно і серіалів.
+Тобі дають англомовну новину кіноіндустрії (статтю або допис з X).
+
+КРОК 1. Оціни важливість (score, ціле число 0–10) за цими критеріями:
+{criteria}
+
+КРОК 2. Напиши українською:
+- title: заголовок-суть до 100 символів, без клікбейту;
+- summary: 2–4 речення, до 600 символів: що сталося, хто, коли, чому це важливо.
+  Прибери хештеги, емодзі, згадки @, заклики «репостни/підпишись».{FILM_PROMPT_EXTRA}
+Якщо score нижче 3 — title і summary можна залишити порожніми.
+
+Правила мови:
+- Жива літературна українська, без калькування з англійської і без русизмів.
+- Назви фільмів і серіалів — в оригіналі (Dune: Part Three, The Last of Us);
+  імена акторів і режисерів — українською транслітерацією (Дені Вільнев).
+- Нічого не вигадуй, лише факти з наданого тексту.
+- Дати та суми касових зборів — у звичному українському форматі.
+
+Відповідай ЛИШЕ JSON-об'єктом: {{"score": 0, "title": "...", "summary": "...", "games": [], "company": ""}}"""
     return f"""Ти — редактор українського Telegram-каналу новин відеоігрової індустрії.
 Тобі дають {SOURCE_HINTS[kind]}
 
@@ -263,10 +295,10 @@ def fetch_page(url, want_text=True):
     return text[:6000], og
 
 
-def collect_rss(seen_set, remember):
+def collect_rss(seen_set, remember, feeds_file=FEEDS_FILE, topic="games"):
     now = datetime.now(timezone.utc)
     items = []
-    for name, url in read_list(FEEDS_FILE):
+    for name, url in read_list(feeds_file):
         source = name or urlparse(url).netloc.replace("www.", "")
         try:
             resp = requests.get(url, headers=HEADERS, timeout=30)
@@ -290,6 +322,7 @@ def collect_rss(seen_set, remember):
                 continue
             items.append({
                 "kind": "article",
+                "topic": topic,
                 "key": key,
                 "link": link,
                 "source": source,
@@ -330,7 +363,9 @@ def tweet_image(tw):
 
 
 def collect_tweets(seen_set, state):
-    accounts = [h.lstrip("@") for _, h in read_list(X_ACCOUNTS_FILE)]
+    topic_of = {h.lstrip("@").lower(): "games" for _, h in read_list(X_ACCOUNTS_FILE)}
+    topic_of.update({h.lstrip("@").lower(): "film" for _, h in read_list(FILM_X_ACCOUNTS_FILE)})
+    accounts = list(topic_of)
     if not accounts:
         return []
     if not X_API_KEY:
@@ -376,6 +411,7 @@ def collect_tweets(seen_set, state):
                     continue  # порожні твіти (лише картинка/посилання) пропускаємо
                 items.append({
                     "kind": "tweet",
+                    "topic": topic_of.get(handle.lower(), "games"),
                     "key": key,
                     "link": link,
                     "source": f"{author.get('name') or handle} (@{handle}) у X",
@@ -885,8 +921,8 @@ def call_llm(model, system_prompt, user_text, use_json=True):
     return score, (data.get("title") or "").strip(), (data.get("summary") or "").strip(), games
 
 
-def summarize(kind, title, text, source, recent_titles=()):
-    prompt = build_prompt(kind)
+def summarize(kind, title, text, source, recent_titles=(), topic="games"):
+    prompt = build_prompt(kind, topic)
     if recent_titles:
         prompt += (
             "\n\nНОВИНИ, ЯКІ ВЖЕ Є В КАНАЛІ (за останні 3 доби; заголовок — суть):\n"
@@ -1020,11 +1056,12 @@ def build_caption(title, summary, link, source, steam_links=None, origin_text=""
     )
 
 
-def post(caption, image_url):
+def post(caption, image_url, chat=None):
+    chat = chat or TG_CHAT
     if DRY_RUN:
         log("----- DRY RUN -----\n" + caption + f"\n[картинка: {image_url}]\n")
         return
-    base = {"chat_id": TG_CHAT, "caption": caption, "parse_mode": "HTML"}
+    base = {"chat_id": chat, "caption": caption, "parse_mode": "HTML"}
     if image_url:
         # 1) просимо Telegram самому завантажити картинку за посиланням
         try:
@@ -1039,17 +1076,17 @@ def post(caption, image_url):
         except Exception as e:
             log(f"   ! не вдалось відправити картинку ({e}), шлю текстом")
     # 3) без картинки — звичайне повідомлення з прев'ю посилання
-    return tg("sendMessage", data={"chat_id": TG_CHAT, "text": caption, "parse_mode": "HTML"})
+    return tg("sendMessage", data={"chat_id": chat, "text": caption, "parse_mode": "HTML"})
 
 
-def post_score(sent, score, origin_text=""):
+def post_score(sent, score, origin_text="", chat=None):
     """Оцінка окремим повідомленням-відповіддю під постом: сам пост лишається чистим для пересилання."""
     if DRY_RUN or not sent:
         return
     msg_id = (sent.get("result") or {}).get("message_id")
     try:
         tg("sendMessage", data={
-            "chat_id": TG_CHAT,
+            "chat_id": chat or TG_CHAT,
             "text": f"↑ Важливість: {score}/10" + (f"\n\n{origin_text}" if origin_text else ""),
             "reply_to_message_id": msg_id,
             "disable_notification": "true",
@@ -1084,7 +1121,9 @@ def main():
         save_json(SEEN_FILE, seen[-SEEN_LIMIT:])
         save_json(STATE_FILE, state)
 
-    items = (collect_rss(seen_set, remember) + collect_tweets(seen_set, state)
+    items = (collect_rss(seen_set, remember)
+             + collect_rss(seen_set, remember, FILM_FEEDS_FILE, "film")
+             + collect_tweets(seen_set, state)
              + collect_steam(seen_set, remember, state) + collect_discord(seen_set, state))
     items.sort(key=lambda i: i["date"])  # старіші першими — стрічка йде по порядку
     log(f"Знайдено нових новин: {len(items)}")
@@ -1125,8 +1164,10 @@ def main():
                 score, title_uk, summary_uk, games = summarize(
                     it["kind"], it["title"], text or it["title"], it["source"],
                     [f'{r["t"]} — {r.get("s", "")}' for r in recent[-150:]],
+                    topic=it.get("topic", "games"),
                 )
-            threshold = MIN_SCORE[it["kind"]]
+            is_film = it.get("topic") == "film"
+            threshold = MIN_SCORE["film"] if is_film else MIN_SCORE[it["kind"]]
             if title_uk.strip().upper() == "ДУБЛЬ":
                 skipped += 1
                 log(f"   = дубль, пропущено: [{it['source']}] {it['title'][:90]}")
@@ -1134,17 +1175,20 @@ def main():
                 skipped += 1
                 log(f"   - [{score}/10] пропущено: [{it['source']}] {it['title'][:90]}")
             else:
-                log(f"-> [{score}/10] [{it['source']}] {title_uk}")
-                steam_links = steam_links_for(games, state)
+                log(f"-> [{score}/10] {'[кіно] ' if is_film else ''}[{it['source']}] {title_uk}")
+                steam_links = {} if is_film else steam_links_for(games, state)
                 origin_text = ""
-                if games:
+                if is_film:
+                    pass  # для кіно перевірку походження і посилання Steam не робимо
+                elif games:
                     origin = check_origin(games[0], steam_links.get(games[0]), state)
                     origin_text = origin_block(origin)
                     log("   " + (origin_text.replace("\n", " | ") or "походження: порожня відповідь ШІ"))
                 else:
                     log("   i у новині не знайдено ні гри, ні компанії — перевірку походження пропущено")
-                sent = post(build_caption(title_uk, summary_uk, it["link"], it["source"], steam_links), image)
-                post_score(sent, score, origin_text)
+                chat = TG_FILM_CHAT if is_film else TG_CHAT
+                sent = post(build_caption(title_uk, summary_uk, it["link"], it["source"], steam_links), image, chat)
+                post_score(sent, score, origin_text, chat)
                 recent.append({"t": title_uk, "s": summary_uk.split(". ")[0][:140], "ts": int(time.time())})
                 posted += 1
                 if not DRY_RUN:

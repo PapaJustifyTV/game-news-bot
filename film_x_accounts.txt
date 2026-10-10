@@ -1,0 +1,26 @@
+# Акаунти X (Twitter) з новинами КІНО і СЕРІАЛІВ. Один юзернейм у рядку.
+# Читаються тим самим ключем twitterapi.io, що й ігрові. Порада: перевірте, що акаунти живі.
+
+# === Новини та агрегатори ===
+DiscussingFilm
+FilmUpdates
+CultureCrave
+DEADLINE
+Variety
+THR
+IndieWire
+Letterboxd
+
+# === Інсайдери ===
+Jeff_Sneider
+DanielRPK
+MyTimeToShineH
+
+# === Студії та стрімінги ===
+MarvelStudios
+DCStudios
+A24
+netflix
+PrimeVideo
+hbomax
+warnerbros

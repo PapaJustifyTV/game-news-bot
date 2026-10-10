@@ -1,0 +1,10 @@
+# RSS-стрічки новин КІНО і СЕРІАЛІВ. Формат: Назва | посилання
+# Щоб вимкнути — поставте # на початку рядка.
+
+Deadline | https://deadline.com/feed/
+Variety | https://variety.com/feed/
+The Hollywood Reporter | https://www.hollywoodreporter.com/feed/
+IndieWire | https://www.indiewire.com/feed/
+/Film | https://www.slashfilm.com/feed/
+Collider | https://collider.com/feed/
+TheWrap | https://www.thewrap.com/feed/

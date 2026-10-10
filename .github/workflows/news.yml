@@ -2,7 +2,7 @@ name: Game news bot
 
 on:
   schedule:
-    - cron: "5,35 * * * *"    # двічі на годину, о :07 і :37 (не о :00 — тоді GitHub перевантажений)
+    - cron: "5,35 * * * *"    # двічі на годину, о :05 і :35 (не о :00 — тоді GitHub перевантажений)
   workflow_dispatch:          # кнопка ручного запуску у вкладці Actions
 
 permissions:
@@ -45,6 +45,7 @@ jobs:
           DISCORD_BOT_TOKEN: ${{ secrets.DISCORD_BOT_TOKEN }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          TELEGRAM_FILM_CHAT_ID: ${{ secrets.TELEGRAM_FILM_CHAT_ID }}
           LLM_PROVIDER: ${{ vars.LLM_PROVIDER }}
           LLM_MODEL: ${{ vars.LLM_MODEL }}
           MIN_SCORE: ${{ vars.MIN_SCORE }}
@@ -52,6 +53,7 @@ jobs:
           MIN_SCORE_TWEET: ${{ vars.MIN_SCORE_TWEET }}
           MIN_SCORE_STEAM: ${{ vars.MIN_SCORE_STEAM }}
           MIN_SCORE_DISCORD: ${{ vars.MIN_SCORE_DISCORD }}
+          MIN_SCORE_FILM: ${{ vars.MIN_SCORE_FILM }}
           MAX_POSTS_PER_RUN: ${{ vars.MAX_POSTS_PER_RUN }}
           MAX_LLM_CALLS: ${{ vars.MAX_LLM_CALLS }}
           MAX_AGE_HOURS: ${{ vars.MAX_AGE_HOURS }}
