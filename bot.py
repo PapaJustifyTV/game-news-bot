@@ -14,7 +14,7 @@
   LLM_MODEL           необов'язково: конкретна модель
   X_API_KEY           необов'язково: ключ twitterapi.io, щоб читати X/Twitter
   DISCORD_BOT_TOKEN   необов'язково: токен свого Discord-бота, щоб читати оголошення
-  MIN_SCORE           поріг важливості 0–10 для всіх джерел (5)
+  MIN_SCORE           поріг важливості 0–10 для всіх джерел (7)
   MIN_SCORE_ARTICLE / MIN_SCORE_TWEET / MIN_SCORE_STEAM / MIN_SCORE_DISCORD
                       окремий поріг для джерела (якщо треба інший)
   MAX_LLM_CALLS       максимум запитів до ШІ за запуск (0 = без обмеження)
@@ -101,7 +101,7 @@ if not MODELS:
 
 X_API_KEY = os.getenv("X_API_KEY", "")
 DISCORD_TOKEN = os.getenv("DISCORD_BOT_TOKEN", "")
-MIN_SCORE_DEFAULT = int(os.getenv("MIN_SCORE") or "5")
+MIN_SCORE_DEFAULT = int(os.getenv("MIN_SCORE") or "7")
 MIN_SCORE = {
     kind: int(os.getenv(f"MIN_SCORE_{kind.upper()}") or MIN_SCORE_DEFAULT)
     for kind in ("article", "tweet", "steam", "discord", "film")
