@@ -921,6 +921,47 @@ def call_llm(model, system_prompt, user_text, use_json=True):
     return score, (data.get("title") or "").strip(), (data.get("summary") or "").strip(), games
 
 
+_DUP_STOP = {
+    "the", "and", "for", "with", "new", "has", "its", "from", "will", "are", "was", "this", "that",
+    "для", "про", "від", "після", "через", "його", "її", "їх", "свою", "свій", "нова", "новий",
+    "нові", "нового", "нової", "також", "буде", "може", "стала", "став", "було", "який", "яка",
+    "які", "якій", "цього", "року", "році", "разом", "перед", "серед", "щодо", "вже", "ще",
+}
+
+
+def _dup_tokens(text):
+    words = re.findall(r"[\w']+", (text or "").lower())
+    return {w[:5] for w in words if len(w) >= 3 and w not in _DUP_STOP}
+
+
+def _latin_names(text):
+    return {w.lower()[:5] for w in re.findall(r"[A-Za-z][A-Za-z0-9']+", text or "") if len(w) >= 3
+            and w.lower() not in _DUP_STOP}
+
+
+def _jaccard(a, b):
+    return len(a & b) / len(a | b) if a and b else 0.0
+
+
+def find_local_duplicate(title, summary, recent):
+    """Швидка перевірка без ШІ: чи схожа новина на нещодавно опубліковану."""
+    first = (summary or "").split(". ")[0]
+    t, ts = _dup_tokens(title), _dup_tokens(title + " " + first)
+    names = _latin_names(title)
+    if len(t) < 2:
+        return None
+    for r in reversed(recent):
+        other_t, other_s = r.get("t", ""), r.get("s", "")
+        jac_title = _jaccard(t, _dup_tokens(other_t))
+        jac_full = _jaccard(ts, _dup_tokens(other_t + " " + other_s))
+        shared = names & _latin_names(other_t)
+        # майже однакові заголовки, або однакові власні назви (гра/фільм/компанія) + схожий зміст
+        if (max(jac_title, jac_full) >= 0.6 or (len(shared) >= 3 and jac_full >= 0.25)
+                or (len(shared) >= 2 and jac_full >= 0.4)):
+            return other_t
+    return None
+
+
 def summarize(kind, title, text, source, recent_titles=(), topic="games"):
     prompt = build_prompt(kind, topic)
     if recent_titles:
@@ -929,9 +970,13 @@ def summarize(kind, title, text, source, recent_titles=(), topic="games"):
             + "\n".join(f"- {t}" for t in recent_titles)
             + "\nПорівнюй за СЕНСОМ, а не за словами: заголовки з різних джерел можуть бути "
               "зовсім різними. Якщо ця новина про ту саму подію (той самий анонс, реліз, дата, "
-              "трейлер, оновлення, угода), що й одна з наведених вище, і НЕ додає нових важливих "
-              "фактів — це дубль. Наприклад: «Гра X вийшла на ПК» і «Відбувся реліз X у Steam» — "
-              "дубль; «Анонсовано X» і пізніше «X вийде 5 травня» — НЕ дубль (нова дата). "
+              "трейлер, оновлення, угода, кастинг), що й одна з наведених вище, — це ДУБЛЬ, навіть "
+              "якщо тут є дрібні додаткові деталі (імена продюсерів, історія серії, цитати). "
+              "НЕ дубль лише тоді, коли змінилася сама подія: з'явилася нова дата, вийшов трейлер, "
+              "відбувся реліз, гру чи фільм скасували. Приклади: «Гра X вийшла на ПК» і «Відбувся "
+              "реліз X у Steam» — дубль; «Disney анонсувала серіал X» і «Disney дала зелене світло "
+              "серіалу X, продюсером став автор» — дубль; «Анонсовано X» і пізніше «X вийде 5 травня» "
+              "— НЕ дубль. Якщо сумніваєшся — вважай дублем. "
               "Для дубля "
               'поверни {"score": 0, "title": "ДУБЛЬ", "summary": ""}.'
         )
@@ -1168,9 +1213,13 @@ def main():
                 )
             is_film = it.get("topic") == "film"
             threshold = MIN_SCORE["film"] if is_film else MIN_SCORE[it["kind"]]
+            local_dup = find_local_duplicate(title_uk, summary_uk, recent) if title_uk else None
             if title_uk.strip().upper() == "ДУБЛЬ":
                 skipped += 1
                 log(f"   = дубль, пропущено: [{it['source']}] {it['title'][:90]}")
+            elif local_dup:
+                skipped += 1
+                log(f"   = дубль (схоже на «{local_dup[:60]}»), пропущено: [{it['source']}] {title_uk[:80]}")
             elif score < threshold or not title_uk:
                 skipped += 1
                 log(f"   - [{score}/10] пропущено: [{it['source']}] {it['title'][:90]}")
