@@ -155,6 +155,11 @@ def build_prompt(kind, topic="games"):
 - title: заголовок-суть до 100 символів, без клікбейту;
 - summary: 2–4 речення, до 600 символів: що сталося, хто, коли, чому це важливо.
   Прибери хештеги, емодзі, згадки @, заклики «репостни/підпишись».{FILM_PROMPT_EXTRA}
+- subject: ПОВНА офіційна англійська назва головної гри / фільму / серіалу / компанії, про яку
+  новина (наприклад "Narnia: The Magician's Nephew", "Grand Theft Auto VI", "Ubisoft").
+- event: тип події, ОДНЕ слово з переліку: announcement, trailer, poster, images, release_date,
+  delay, release, casting, cancellation, update, dlc, sales, box_office, acquisition, layoffs,
+  lawsuit, award, interview, review, rumor, other.
 Якщо score нижче 3 — title і summary можна залишити порожніми.
 
 Правила мови:
@@ -164,7 +169,7 @@ def build_prompt(kind, topic="games"):
 - Нічого не вигадуй, лише факти з наданого тексту.
 - Дати та суми касових зборів — у звичному українському форматі.
 
-Відповідай ЛИШЕ JSON-об'єктом: {{"score": 0, "title": "...", "summary": "...", "games": [], "company": ""}}"""
+Відповідай ЛИШЕ JSON-об'єктом: {{"score": 0, "title": "...", "summary": "...", "games": [], "company": "", "subject": "", "event": ""}}"""
     return f"""Ти — редактор українського Telegram-каналу новин відеоігрової індустрії.
 Тобі дають {SOURCE_HINTS[kind]}
 
@@ -180,6 +185,11 @@ def build_prompt(kind, topic="games"):
   загалом, не фільми. Якщо ігор немає — порожній список.
 - company: якщо новина не про конкретну гру, а про компанію (студію, видавця) — її назва
   в оригіналі; інакше порожній рядок.
+- subject: ПОВНА офіційна англійська назва головної гри / фільму / серіалу / компанії, про яку
+  новина (наприклад "Narnia: The Magician's Nephew", "Grand Theft Auto VI", "Ubisoft").
+- event: тип події, ОДНЕ слово з переліку: announcement, trailer, poster, images, release_date,
+  delay, release, casting, cancellation, update, dlc, sales, box_office, acquisition, layoffs,
+  lawsuit, award, interview, review, rumor, other.
 Якщо score нижче 3 — title і summary можна залишити порожніми.
 
 Правила мови:
@@ -188,7 +198,7 @@ def build_prompt(kind, topic="games"):
 - Нічого не вигадуй, лише факти з наданого тексту.
 - Дати та ціни — у звичному українському форматі.
 
-Відповідай ЛИШЕ JSON-об'єктом: {{"score": 0, "title": "...", "summary": "...", "games": ["..."], "company": ""}}"""
+Відповідай ЛИШЕ JSON-об'єктом: {{"score": 0, "title": "...", "summary": "...", "games": ["..."], "company": "", "subject": "", "event": ""}}"""
 
 
 # ---------------------------------------------------------------- утиліти
@@ -918,7 +928,9 @@ def call_llm(model, system_prompt, user_text, use_json=True):
     company = str(data.get("company") or "").strip()
     if company and not games:
         games = [f"{COMPANY_MARK}{company}"]  # позначка: перевіряти компанію, а не гру
-    return score, (data.get("title") or "").strip(), (data.get("summary") or "").strip(), games
+    event_key = {"subj": str(data.get("subject") or "").strip(),
+                 "ev": str(data.get("event") or "").strip().lower()}
+    return score, (data.get("title") or "").strip(), (data.get("summary") or "").strip(), games, event_key
 
 
 _DUP_STOP = {
@@ -943,8 +955,40 @@ def _jaccard(a, b):
     return len(a & b) / len(a | b) if a and b else 0.0
 
 
-def find_local_duplicate(title, summary, recent):
+def _subj_tokens(name):
+    name = re.sub(r"[’'`]", "", (name or "").lower())
+    return {w for w in re.findall(r"[a-z0-9]+|[а-яіїєґ]+", name) if w not in ("the", "a", "an", "of")}
+
+
+SAME_EVENT = {  # типи подій, які вважаємо однією подією
+    "poster": "visual", "images": "visual",
+    "release_date": "date", "delay": "date",
+}
+
+
+def find_event_duplicate(event_key, recent, title="", summary=""):
+    """Та сама головна гра/фільм + той самий тип події за останні 3 доби → дубль."""
+    subj, ev = _subj_tokens(event_key.get("subj")), (event_key.get("ev") or "")
+    if not subj or not ev or ev in ("other", "interview", "review", "rumor"):
+        return None
+    ev = SAME_EVENT.get(ev, ev)
+    mine = _dup_tokens(title + " " + (summary or "").split(". ")[0])
+    for r in reversed(recent):
+        o_subj, o_ev = _subj_tokens(r.get("subj")), SAME_EVENT.get(r.get("ev", ""), r.get("ev", ""))
+        if not o_subj or o_ev != ev:
+            continue
+        if subj == o_subj:
+            return r.get("t", "")
+        # «Narnia» і «Narnia: The Magician's Nephew» — той самий предмет, якщо й зміст схожий
+        if (subj <= o_subj or o_subj <= subj) and \
+                _jaccard(mine, _dup_tokens(r.get("t", "") + " " + r.get("s", ""))) >= 0.2:
+            return r.get("t", "")
+    return None
+
+
+def find_local_duplicate(title, summary, recent, event_key=None):
     """Швидка перевірка без ШІ: чи схожа новина на нещодавно опубліковану."""
+    my_ev = SAME_EVENT.get((event_key or {}).get("ev", ""), (event_key or {}).get("ev", ""))
     first = (summary or "").split(". ")[0]
     t, ts = _dup_tokens(title), _dup_tokens(title + " " + first)
     names = _latin_names(title)
@@ -952,6 +996,9 @@ def find_local_duplicate(title, summary, recent):
         return None
     for r in reversed(recent):
         other_t, other_s = r.get("t", ""), r.get("s", "")
+        o_ev = SAME_EVENT.get(r.get("ev", ""), r.get("ev", ""))
+        if my_ev and o_ev and my_ev != o_ev and "other" not in (my_ev, o_ev):
+            continue  # різні події (постер vs трейлер) — це не дубль
         jac_title = _jaccard(t, _dup_tokens(other_t))
         jac_full = _jaccard(ts, _dup_tokens(other_t + " " + other_s))
         shared = names & _latin_names(other_t)
@@ -1203,17 +1250,18 @@ def main():
 
         try:
             if not LLM_API_KEY and DRY_RUN:
-                score, title_uk, summary_uk, games = 10, it["title"], text[:300], []
+                score, title_uk, summary_uk, games, event_key = 10, it["title"], text[:300], [], {}
             else:
                 llm_calls += 1
-                score, title_uk, summary_uk, games = summarize(
+                score, title_uk, summary_uk, games, event_key = summarize(
                     it["kind"], it["title"], text or it["title"], it["source"],
                     [f'{r["t"]} — {r.get("s", "")}' for r in recent[-150:]],
                     topic=it.get("topic", "games"),
                 )
             is_film = it.get("topic") == "film"
             threshold = MIN_SCORE["film"] if is_film else MIN_SCORE[it["kind"]]
-            local_dup = find_local_duplicate(title_uk, summary_uk, recent) if title_uk else None
+            local_dup = (find_event_duplicate(event_key, recent, title_uk, summary_uk)
+                         or (find_local_duplicate(title_uk, summary_uk, recent, event_key) if title_uk else None))
             if title_uk.strip().upper() == "ДУБЛЬ":
                 skipped += 1
                 log(f"   = дубль, пропущено: [{it['source']}] {it['title'][:90]}")
@@ -1238,7 +1286,8 @@ def main():
                 chat = TG_FILM_CHAT if is_film else TG_CHAT
                 sent = post(build_caption(title_uk, summary_uk, it["link"], it["source"], steam_links), image, chat)
                 post_score(sent, score, origin_text, chat)
-                recent.append({"t": title_uk, "s": summary_uk.split(". ")[0][:140], "ts": int(time.time())})
+                recent.append({"t": title_uk, "s": summary_uk.split(". ")[0][:140], "ts": int(time.time()),
+                               "subj": event_key.get("subj", ""), "ev": event_key.get("ev", "")})
                 posted += 1
                 if not DRY_RUN:
                     time.sleep(3)  # щоб не впертись у ліміти Telegram
