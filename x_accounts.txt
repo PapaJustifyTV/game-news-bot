@@ -15,6 +15,7 @@ ZhugeEX
 klobrille
 SteamDB
 mrpyo1
+Dexerto
 
 # === Журналісти та лідери думок ===
 stephentotilo

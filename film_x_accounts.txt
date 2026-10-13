@@ -10,6 +10,7 @@ Variety
 THR
 IndieWire
 Letterboxd
+Dexerto
 
 # === Інсайдери ===
 Jeff_Sneider
